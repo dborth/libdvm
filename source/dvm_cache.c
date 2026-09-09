@@ -367,3 +367,25 @@ DvmDisc* dvmDiscCacheCreate(DvmDisc* inner_disc, unsigned cache_pages, unsigned 
 
 	return &disc->base;
 }
+
+bool dvmDiscProbePresence(DvmDisc* disc, void* scratch_buffer)
+{
+	if (!disc || !scratch_buffer) {
+		return false;
+	}
+
+	// Cache-wrapped disc: bypass the page cache entirely and issue a real
+	// read against the inner (uncached) disc, under the same lock the
+	// cache's own read/write path uses - so this can't race a concurrent
+	// file operation on another thread.
+	if (disc->vt == &s_dvmDiscCacheIface) {
+		DvmDiscCache* self = (DvmDiscCache*)disc;
+		__lock_acquire(self->lock);
+		bool ret = dvmDiscReadSectors(self->inner, scratch_buffer, 0, 1);
+		__lock_release(self->lock);
+		return ret;
+	}
+
+	// Not cache-wrapped - every read already touches the disc directly.
+	return dvmDiscReadSectors(disc, scratch_buffer, 0, 1);
+}
