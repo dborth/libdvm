@@ -60,16 +60,10 @@ static inline uint64_t _dvmRead64(const void* buf, unsigned offset)
 
 static const char* _dvmIdentMbrVbr(const void* buf)
 {
-	// 1. Check for Wii U File System (WFS) magic signature (" WFS" / 0x20574653)
-	if (memcmp(buf, " WFS", 4) == 0 || memcmp((const char*)buf + 1, "WFS", 3) == 0) {
-		dvmDebug("Identified WFS filesystem\n");
-		return "wfs";
-	}
-
 	unsigned jmp = _dvmRead8(buf, 0);
 	uint16_t sig = _dvmRead16(buf, 0x1fe);
 
-	// 2. Accept standard MBR signature (0xAA55) and uStealth signature (0xAB55)
+	// Accept standard MBR signature (0xAA55) and uStealth signature (0xAB55)
 	bool has_signature = (sig == 0xaa55 || sig == 0xab55);
 
 	// Check for a valid Microsoft VBR
@@ -320,7 +314,9 @@ unsigned dvmProbeMountDisc(const char* basename, DvmDisc* disc)
 	DvmPartInfo partinfo[4];
 	unsigned num_parts = dvmReadPartitionTable(disc, partinfo, 4, DVM_IDENT_FSTYPE);
 	if (!num_parts) {
-		// Prevent mounting attempts on unknown, corrupted, or encrypted WFS drives
+		// No GPT header and no readable MBR/VBR at sector 0 - could be
+		// unformatted, corrupted, or something we just don't understand
+		// (eg. WFS). Either way, nothing to mount; don't guess.
 		return 0;
 	}
 
@@ -334,12 +330,6 @@ unsigned dvmProbeMountDisc(const char* basename, DvmDisc* disc)
 	for (unsigned i = 0; i < num_parts; i++) {
 		DvmPartInfo* part = &partinfo[i];
 		if (!part->fstype) {
-			continue;
-		}
-
-		// Skip WFS partitions cleanly without attempting to mount
-		if (strcmp(part->fstype, "wfs") == 0) {
-			dvmDebug("Skipping WFS partition\n");
 			continue;
 		}
 
