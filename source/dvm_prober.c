@@ -11,9 +11,11 @@
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 #define le16(x) (x)
 #define le32(x) (x)
+#define le64(x) (x)
 #else
 #define le16(x) __builtin_bswap16(x)
 #define le32(x) __builtin_bswap32(x)
+#define le64(x) __builtin_bswap64(x)
 #endif
 
 typedef struct DvmMbrPartEntry {
@@ -49,10 +51,26 @@ static inline unsigned _dvmRead32(const void* buf, unsigned offset)
 	return le32(ret);
 }
 
+static inline uint64_t _dvmRead64(const void* buf, unsigned offset)
+{
+	uint64_t ret;
+	memcpy(&ret, (const uint8_t*)buf + offset, sizeof(ret));
+	return le64(ret);
+}
+
 static const char* _dvmIdentMbrVbr(const void* buf)
 {
+	// 1. Check for Wii U File System (WFS) magic signature (" WFS" / 0x20574653)
+	if (memcmp(buf, " WFS", 4) == 0 || memcmp((const char*)buf + 1, "WFS", 3) == 0) {
+		dvmDebug("Identified WFS filesystem\n");
+		return "wfs";
+	}
+
 	unsigned jmp = _dvmRead8(buf, 0);
-	bool has_signature = _dvmRead16(buf, 0x1fe) == 0xaa55;
+	uint16_t sig = _dvmRead16(buf, 0x1fe);
+
+	// 2. Accept standard MBR signature (0xAA55) and uStealth signature (0xAB55)
+	bool has_signature = (sig == 0xaa55 || sig == 0xab55);
 
 	// Check for a valid Microsoft VBR
 	if (has_signature && (jmp == 0xeb || jmp == 0xe9 || jmp == 0xe8)) {
@@ -102,6 +120,85 @@ static const char* _dvmIdentMbrVbr(const void* buf)
 	return NULL;
 }
 
+static bool _dvmIsGptUnusedGuid(const uint8_t* guid)
+{
+	for (int i = 0; i < 16; i++) {
+		if (guid[i] != 0) return false;
+	}
+	return true;
+}
+
+static unsigned _dvmReadGptPartitionTable(DvmDisc* disc, DvmPartInfo* out, unsigned max_partitions, unsigned flags, void* buf, size_t buf_sz)
+{
+	// Read GPT Header at LBA 1
+	if (!disc->vt->read_sectors(disc, buf, 1, 1, true)) {
+		dvmDebug("GPT header read error\n");
+		return 0;
+	}
+
+	if (memcmp(buf, "EFI PART", 8) != 0) {
+		dvmDebug("Invalid GPT signature\n");
+		return 0;
+	}
+
+	uint64_t entry_lba = _dvmRead64(buf, 0x48);
+	uint32_t num_entries = _dvmRead32(buf, 0x50);
+	uint32_t entry_size = _dvmRead32(buf, 0x54);
+
+	if (entry_size < 128 || num_entries == 0) {
+		return 0;
+	}
+
+	unsigned num_parts = 0;
+	size_t sectors_per_entry_block = buf_sz / disc->sector_sz;
+	size_t entries_per_sector = disc->sector_sz / entry_size;
+	size_t total_sectors = (num_entries * entry_size + disc->sector_sz - 1) / disc->sector_sz;
+
+	for (size_t sec_offset = 0; sec_offset < total_sectors && num_parts < max_partitions; sec_offset += sectors_per_entry_block) {
+		size_t count = (total_sectors - sec_offset < sectors_per_entry_block) ? (total_sectors - sec_offset) : sectors_per_entry_block;
+		if (!disc->vt->read_sectors(disc, buf, entry_lba + sec_offset, count, true)) {
+			dvmDebug("GPT partition array read error\n");
+			break;
+		}
+
+		size_t current_entries = count * entries_per_sector;
+		for (size_t i = 0; i < current_entries && num_parts < max_partitions; i++) {
+			const uint8_t* entry = (const uint8_t*)buf + (i * entry_size);
+			if (_dvmIsGptUnusedGuid(entry)) {
+				continue;
+			}
+
+			uint64_t start_lba = _dvmRead64(entry, 0x20);
+			uint64_t end_lba = _dvmRead64(entry, 0x28);
+			if (end_lba < start_lba) {
+				continue;
+			}
+
+			DvmPartInfo* part = &out[num_parts++];
+			part->index = num_parts;
+			part->type = 0xEE;
+			part->fstype = NULL;
+			part->start_sector = start_lba;
+			part->num_sectors = (end_lba - start_lba) + 1;
+		}
+	}
+
+	// Identify fstype for GPT partitions if requested
+	if (flags & DVM_IDENT_FSTYPE) {
+		for (unsigned i = 0; i < num_parts; i++) {
+			if (!disc->vt->read_sectors(disc, buf, out[i].start_sector, buf_sz / disc->sector_sz, true)) {
+				continue;
+			}
+			const char* ident = _dvmIdentMbrVbr(buf);
+			if (ident && *ident) {
+				out[i].fstype = ident;
+			}
+		}
+	}
+
+	return num_parts;
+}
+
 static unsigned _dvmReadPartitionTable(DvmDisc* disc, DvmPartInfo* out, unsigned max_partitions, unsigned flags, void* buf, size_t buf_sz)
 {
 	if (!disc->vt->read_sectors(disc, buf, 0, buf_sz / disc->sector_sz, true)) {
@@ -130,7 +227,17 @@ static unsigned _dvmReadPartitionTable(DvmDisc* disc, DvmPartInfo* out, unsigned
 	DvmMbrPartEntry* mbr_part = (DvmMbrPartEntry*)((char*)buf + 0x1be);
 	sec_t total_used_sectors = 0;
 	unsigned num_parts = 0;
-	for (unsigned i = 0; i < 4 && num_parts < max_partitions; i ++) {
+
+	// Check for Protective MBR (GPT)
+	for (unsigned i = 0; i < 4; i++) {
+		if (mbr_part[i].type == 0xEE) {
+			dvmDebug("Found GPT protective partition, switching to GPT parser\n");
+			return _dvmReadGptPartitionTable(disc, out, max_partitions, flags, buf, buf_sz);
+		}
+	}
+
+	// Parse standard MBR entries
+	for (unsigned i = 0; i < 4 && num_parts < max_partitions; i++) {
 		unsigned status = mbr_part[i].status;
 		unsigned type   = mbr_part[i].type;
 
@@ -196,6 +303,9 @@ unsigned dvmReadPartitionTable(DvmDisc* disc, DvmPartInfo* out, unsigned max_par
 
 	unsigned num_parts = 0;
 	size_t buf_sz = disc->sector_sz < MIN_BUF_SZ ? MIN_BUF_SZ : disc->sector_sz;
+	// Ensure buffer size is a multiple of LIBDVM_BUFFER_ALIGN for aligned_alloc compliance
+	buf_sz = (buf_sz + LIBDVM_BUFFER_ALIGN - 1) & ~(LIBDVM_BUFFER_ALIGN - 1);
+
 	void* buf = aligned_alloc(LIBDVM_BUFFER_ALIGN, buf_sz);
 	if (buf) {
 		num_parts = _dvmReadPartitionTable(disc, out, max_partitions, flags, buf, buf_sz);
@@ -210,7 +320,8 @@ unsigned dvmProbeMountDisc(const char* basename, DvmDisc* disc)
 	DvmPartInfo partinfo[4];
 	unsigned num_parts = dvmReadPartitionTable(disc, partinfo, 4, DVM_IDENT_FSTYPE);
 	if (!num_parts) {
-		return dvmMountVolume(basename, disc, 0, "exfat") ? 1 : 0;
+		// Prevent mounting attempts on unknown, corrupted, or encrypted WFS drives
+		return 0;
 	}
 
 	dvmDebug("Loaded %u partitions\n", num_parts);
@@ -220,9 +331,15 @@ unsigned dvmProbeMountDisc(const char* basename, DvmDisc* disc)
 
 	// Try to mount partitions
 	unsigned num_mounted = 0;
-	for (unsigned i = 0; i < num_parts; i ++) {
+	for (unsigned i = 0; i < num_parts; i++) {
 		DvmPartInfo* part = &partinfo[i];
 		if (!part->fstype) {
+			continue;
+		}
+
+		// Skip WFS partitions cleanly without attempting to mount
+		if (strcmp(part->fstype, "wfs") == 0) {
+			dvmDebug("Skipping WFS partition\n");
 			continue;
 		}
 
@@ -230,7 +347,7 @@ unsigned dvmProbeMountDisc(const char* basename, DvmDisc* disc)
 		volname[basenamelen+1] = 0;
 
 		if (dvmMountPartition(volname, disc, part)) {
-			num_mounted ++;
+			num_mounted++;
 		}
 	}
 
