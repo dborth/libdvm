@@ -16,6 +16,8 @@ export VER_PATCH	:=	0
 
 VERSION	:=	$(VER_MAJOR).$(VER_MINOR).$(VER_PATCH)
 
+LIBNTFS := libntfs
+
 #-------------------------------------------------------------------------------
 # TARGET is the name of the output
 # BUILD is the directory where object files & intermediate files will be placed
@@ -25,11 +27,13 @@ VERSION	:=	$(VER_MAJOR).$(VER_MINOR).$(VER_PATCH)
 TARGET		:=	$(notdir $(CURDIR))
 BUILD		:=	build
 SOURCES		:=	source \
-				fatfs/source
+				fatfs/source \
+				$(LIBNTFS)/source
 INCLUDES	:=	source \
 				fatfs/source \
-				include \
-
+				$(LIBNTFS)/source \
+				$(LIBNTFS)/include \
+				include
 #---------------------------------------------------------------------------------
 # options for code generation
 #---------------------------------------------------------------------------------
@@ -38,14 +42,14 @@ CFLAGS	:=	-Wall -Werror \
 			$(MACHDEP) \
 			$(BUILD_CFLAGS)
 
-CFLAGS	+=	$(INCLUDE) -D__WIIU__ -D__WUT__
+CFLAGS	+=	$(INCLUDE) -D__WIIU__ -D__WUT__ -DHAVE_CONFIG_H
 
 ASFLAGS	:=	$(MACHDEP)
 
 LDFLAGS	=	$(ARCH) -Wl,--gc-sections
 
 
-LIBS	:= 
+LIBS	:=
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing
@@ -85,7 +89,9 @@ CFILES		:=	dvm_disc.c \
 				fat_driver.c \
 				fat_wrappers.c \
 				ff.c \
-				ffunicode.c
+				ffunicode.c \
+				ntfs_driver.c \
+				$(notdir $(wildcard $(LIBNTFS)/source/*.c))
 
 #---------------------------------------------------------------------------------
 
