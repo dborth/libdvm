@@ -6,4 +6,7 @@
 	path = lwext4
 	url = https://github.com/extremscorner/lwext4.git
 	branch = dkp-mods
-	
+[submodule "libntfs"]
+	path = libntfs
+	url = https://github.com/wiiu-env/libntfs.git
+	branch = main
