@@ -3,6 +3,7 @@
 #pragma once
 #include <stdlib.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <sys/lock.h>
 #include <sys/iosupport.h>
 #include <dvm.h>
@@ -38,6 +39,11 @@ typedef struct NtfsDvmIo {
 	                        // the non-p{read,write} read()/write()/seek()
 	                        // device ops; libntfs itself almost always
 	                        // uses ntfs_pread()/ntfs_pwrite() instead
+	bool     disc_gone;    // set by _ntfs_umount() when a fresh presence
+	                        // probe confirms the disc is already gone -
+	                        // makes write()/pwrite()/sync() fail instantly
+	                        // instead of forwarding to hardware. See the
+	                        // comment on _ntfs_umount() in ntfs_driver.c.
 } NtfsDvmIo;
 
 // One mounted NTFS volume's worth of state.

@@ -86,6 +86,10 @@ static s64 _ntfs_dev_readbytes(struct ntfs_device* dev, s64 offset, s64 count, v
 		errno = EBADF;
 		return -1;
 	}
+	if (io->disc_gone) {
+		errno = EIO;
+		return -1;
+	}
 	if (offset < 0) {
 		errno = EINVAL;
 		return -1;
@@ -137,6 +141,10 @@ static s64 _ntfs_dev_writebytes(struct ntfs_device* dev, s64 offset, s64 count, 
 	NtfsDvmIo* io = DEV_IO(dev);
 	if (!io || !io->disc) {
 		errno = EBADF;
+		return -1;
+	}
+	if (io->disc_gone) {
+		errno = EIO;
 		return -1;
 	}
 	if (NDevReadOnly(dev)) {
@@ -210,7 +218,7 @@ static s64 _ntfs_dev_writebytes(struct ntfs_device* dev, s64 offset, s64 count, 
 static int _ntfs_dev_open(struct ntfs_device* dev, int flags)
 {
 	NtfsDvmIo* io = DEV_IO(dev);
-	if (!io || !io->disc) {
+	if (!io || !io->disc || io->disc_gone) {
 		errno = EBADF;
 		return -1;
 	}
@@ -300,6 +308,15 @@ static s64 _ntfs_dev_pwrite(struct ntfs_device* dev, const void* buf, s64 count,
 static int _ntfs_dev_sync(struct ntfs_device* dev)
 {
 	NtfsDvmIo* io = DEV_IO(dev);
+
+	// See _ntfs_umount(): dev->d_ops->sync() gets called unconditionally
+	// on *every* unmount, clean or not, dirty inodes or not - so this is
+	// the one call in the whole read-mostly path that's reached even by a
+	// browsing-only session, immediately on unplug.
+	if (io->disc_gone) {
+		errno = EIO;
+		return -1;
+	}
 	if (NDevReadOnly(dev)) {
 		errno = EROFS;
 		return -1;
@@ -427,6 +444,34 @@ void _ntfs_umount(void* device_data)
 {
 	NtfsVolume* vol = (NtfsVolume*)device_data;
 	ntfs_vd* vd = &vol->vd;
+
+	// ntfs_umount() -> __ntfs_volume_release() unconditionally calls
+	// dev->d_ops->sync(dev) (our _ntfs_dev_sync) and, on top of that,
+	// ntfs_inode_sync() on any of $Bitmap/$MFT/$MFTMirr that happen to be
+	// dirty - none of it gated on this fork's ntfs_umount() `force`
+	// parameter, which it doesn't even look at. That's the right thing to
+	// do for a normal eject, but it means every unmount - even a
+	// read-only browsing session - reaches down to the real disc
+	// interface on its way out. On a surprise-removed USB drive, a read
+	// through Mocha's disc interface fails promptly (that's how the
+	// caller already knows to unmount in the first place - see
+	// dvmWutUsbStillPresent()/usbStillPresent()), but a write or flush to
+	// a device that's physically gone does not: it hangs, on real
+	// hardware, rather than erroring out.
+	//
+	// So: re-probe with that same read-based check right before handing
+	// off to ntfs_umount(), and if the disc is confirmed gone, tell our
+	// own device ops to fail fast instead of forwarding to hardware. A
+	// probe here is redundant with the one that got us called in the
+	// hot-unplug case, but this function has no way to know why it was
+	// called (dvmUnmountVolume() has other callers too, eg. a clean
+	// user-requested eject while the drive is still present), so it
+	// always re-checks rather than assuming.
+	void* scratch = aligned_alloc(LIBDVM_BUFFER_ALIGN, vol->io.sector_sz);
+	if (!scratch || !dvmDiscProbePresence(vol->disc, scratch)) {
+		vol->io.disc_gone = true;
+	}
+	free(scratch);
 
 	ntfsDeinitVolume(vd);
 	ntfs_umount(vd->vol, TRUE);
