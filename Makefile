@@ -37,7 +37,7 @@ INCLUDES	:=	source \
 #---------------------------------------------------------------------------------
 # options for code generation
 #---------------------------------------------------------------------------------
-CFLAGS	:=	-Wall -Werror \
+CFLAGS	:=	-Wall \
 			-ffunction-sections -fdata-sections \
 			$(MACHDEP) \
 			$(BUILD_CFLAGS)
