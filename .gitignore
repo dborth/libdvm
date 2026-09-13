@@ -6,5 +6,4 @@ pkg/
 /release/
 /*.tar.bz2
 /lib/
-/include/
 /.project
