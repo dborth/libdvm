@@ -8,5 +8,5 @@
 	branch = dkp-mods
 [submodule "libntfs"]
 	path = libntfs
-	url = https://github.com/wiiu-env/libntfs.git
+	url = https://github.com/dborth/libntfs.git
 	branch = main
